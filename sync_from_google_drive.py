@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Sync latest 3 session folders from Google Drive to GitHub IMAGE folder.
+Uses Google Service Account for authentication (no OAuth required).
 Scans Google Drive folder 'FYP Rehab Glove Vid' for YYYYMMDD_VID folders,
 selects the 3 newest ones, and syncs them to the IMAGE folder.
 Designed to run daily at 10:00 PM via GitHub Actions.
@@ -9,98 +10,51 @@ Designed to run daily at 10:00 PM via GitHub Actions.
 import os
 import re
 import shutil
-import pickle
+import io
 import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple, Optional
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.errors import HttpError
 
 
-# Google Drive API scope
+# Google Drive API setup
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
 # Configuration
 DRIVE_FOLDER_NAME = "FYP Rehab Glove Vid"
+DRIVE_FOLDER_ID = "1xqdps07T1a2aSRLhyWQONWwpBA8uFBml"  # Parent folder ID
 DATE_PATTERN = re.compile(r'^(\d{8})_VID$')
 
 
 class GoogleDriveSync:
-    """Handles Google Drive operations for syncing session folders."""
+    """Handles Google Drive operations for syncing session folders using Service Account."""
     
-    def __init__(self, credentials_path: Optional[Path] = None, token_path: Optional[Path] = None):
+    def __init__(self, credentials_path: str = 'credentials.json'):
         """
-        Initialize Google Drive service.
+        Initialize Google Drive service with Service Account.
         
         Args:
-            credentials_path: Path to credentials.json file
-            token_path: Path to token.pickle file for storing auth
+            credentials_path: Path to service account credentials.json file
         """
-        self.credentials_path = credentials_path or Path("credentials.json")
-        self.token_path = token_path or Path("token.pickle")
+        self.credentials_path = credentials_path
         self.service = self.authenticate()
     
     def authenticate(self):
-        """Authenticate with Google Drive API."""
-        creds = None
-        
-        # Load existing token if available
-        if self.token_path.exists():
-            with open(self.token_path, 'rb') as token:
-                creds = pickle.load(token)
-        
-        # Refresh or get new credentials
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                if not self.credentials_path.exists():
-                    raise FileNotFoundError(
-                        f"credentials.json not found at {self.credentials_path}. "
-                        "Please download it from Google Cloud Console."
-                    )
-                
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    str(self.credentials_path), SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-            
-            # Save credentials for next run
-            with open(self.token_path, 'wb') as token:
-                pickle.dump(creds, token)
-        
-        return build('drive', 'v3', credentials=creds)
-    
-    def find_folder_by_name(self, folder_name: str) -> Optional[str]:
-        """
-        Find folder ID by name in Google Drive.
-        
-        Args:
-            folder_name: Name of the folder to search for
-        
-        Returns:
-            Folder ID if found, None otherwise
-        """
+        """Authenticate with Google Drive API using Service Account."""
         try:
-            query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-            results = self.service.files().list(
-                q=query,
-                spaces='drive',
-                fields='files(id, name)'
-            ).execute()
-            
-            files = results.get('files', [])
-            if files:
-                return files[0]['id']
-            return None
-            
-        except HttpError as error:
-            print(f"❌ Error searching for folder: {error}")
-            return None
+            creds = service_account.Credentials.from_service_account_file(
+                self.credentials_path, scopes=SCOPES
+            )
+            service = build('drive', 'v3', credentials=creds)
+            print("✓ Successfully authenticated with Google Drive Service Account")
+            return service
+        except Exception as e:
+            print(f"❌ Failed to authenticate: {e}")
+            raise
     
     def find_date_folders(self, parent_folder_id: str) -> List[Tuple[str, str, str]]:
         """
@@ -115,11 +69,10 @@ class GoogleDriveSync:
         date_folders = []
         
         try:
-            query = f"'{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            # List all folders in the parent directory
             results = self.service.files().list(
-                q=query,
-                spaces='drive',
-                fields='files(id, name)',
+                q=f"'{parent_folder_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false",
+                fields="files(id, name)",
                 pageSize=1000
             ).execute()
             
@@ -135,6 +88,8 @@ class GoogleDriveSync:
             # Sort by date (newest first)
             date_folders.sort(key=lambda x: x[2], reverse=True)
             
+            print(f"✓ Found {len(date_folders)} date folder(s)")
+            
         except HttpError as error:
             print(f"❌ Error listing folders: {error}")
         
@@ -142,7 +97,7 @@ class GoogleDriveSync:
     
     def download_folder_recursive(self, folder_id: str, local_path: Path, folder_name: str) -> bool:
         """
-        Recursively download all contents of a Google Drive folder.
+        Recursively download all JPG files from a Google Drive folder.
         
         Args:
             folder_id: Google Drive folder ID
@@ -157,11 +112,9 @@ class GoogleDriveSync:
             local_path.mkdir(parents=True, exist_ok=True)
             
             # Query all files in the folder
-            query = f"'{folder_id}' in parents and trashed=false"
             results = self.service.files().list(
-                q=query,
-                spaces='drive',
-                fields='files(id, name, mimeType)',
+                q=f"'{folder_id}' in parents and trashed=false",
+                fields="files(id, name, mimeType)",
                 pageSize=1000
             ).execute()
             
@@ -175,7 +128,6 @@ class GoogleDriveSync:
             for file in files:
                 file_id = file['id']
                 file_name = file['name']
-                mime_type = file['mimeType']
                 
                 # Skip if not a JPEG image
                 if not file_name.lower().endswith('.jpg'):
@@ -186,8 +138,8 @@ class GoogleDriveSync:
                 # Download file
                 request = self.service.files().get_media(fileId=file_id)
                 
-                with open(file_path, 'wb') as f:
-                    downloader = MediaIoBaseDownload(f, request)
+                with io.FileIO(str(file_path), 'wb') as fh:
+                    downloader = MediaIoBaseDownload(fh, request)
                     done = False
                     while not done:
                         status, done = downloader.next_chunk()
@@ -242,7 +194,10 @@ def clear_image_folder(image_dir: Path) -> bool:
                 shutil.rmtree(item)
                 deleted_count += 1
         
-        print(f"✓ Cleared IMAGE folder: {deleted_count} items removed")
+        if deleted_count > 0:
+            print(f"✓ Cleared IMAGE folder: {deleted_count} items removed")
+        else:
+            print("✓ IMAGE folder already empty")
         return True
         
     except Exception as e:
@@ -273,10 +228,11 @@ def copy_downloaded_folders(source_dir: Path, dest_dir: Path, folder_names: List
             continue
         
         try:
-            # Copy folder recursively
+            # Remove destination if it exists
             if dest_path.exists():
                 shutil.rmtree(dest_path)
             
+            # Copy folder recursively
             shutil.copytree(source_path, dest_path)
             copied_folders.append(folder_name)
             print(f"✓ Copied {folder_name} to IMAGE folder")
@@ -299,6 +255,7 @@ def validate_folder_structure(image_dir: Path) -> bool:
     """
     all_valid = True
     pattern = re.compile(r'^\d{8}_VID$')
+    filename_pattern = re.compile(r'^\d+_\d+\.jpg$', re.IGNORECASE)
     
     for folder in image_dir.iterdir():
         if folder.is_dir():
@@ -314,11 +271,30 @@ def validate_folder_structure(image_dir: Path) -> bool:
                 all_valid = False
             else:
                 # Validate filename pattern
-                valid_pattern = re.compile(r'^\d+_\d+\.jpg$', re.IGNORECASE)
-                invalid_files = [f for f in jpg_files if not valid_pattern.match(f.name)]
+                invalid_files = [f for f in jpg_files if not filename_pattern.match(f.name)]
                 if invalid_files:
                     print(f"⚠ Invalid filenames in {folder.name}: {[f.name for f in invalid_files[:5]]}")
+                    if len(invalid_files) > 5:
+                        print(f"   ... and {len(invalid_files) - 5} more")
                     all_valid = False
+                else:
+                    # Check for session/frame numbering
+                    sessions = set()
+                    frames_by_session = {}
+                    for jpg in jpg_files:
+                        parts = jpg.stem.split('_')
+                        if len(parts) == 2:
+                            session = int(parts[0])
+                            frame = int(parts[1])
+                            sessions.add(session)
+                            if session not in frames_by_session:
+                                frames_by_session[session] = []
+                            frames_by_session[session].append(frame)
+                    
+                    print(f"  ✓ {folder.name}: {len(jpg_files)} images, {len(sessions)} session(s)")
+                    for session in sorted(sessions):
+                        frames = sorted(frames_by_session[session])
+                        print(f"    - Session {session}: {len(frames)} frame(s) (1-{max(frames)})")
     
     return all_valid
 
@@ -328,7 +304,7 @@ def main():
     print("=" * 70)
     print(f"🔄 Google Drive to GitHub Sync - Daily Image Update")
     print(f"📅 Started at: {datetime.now()}")
-    print(f"🎯 Target: FYP Rehab Glove Vid (latest 3 folders)")
+    print(f"🎯 Target: {DRIVE_FOLDER_NAME} (latest 3 folders)")
     print("=" * 70)
     
     # Set up paths
@@ -338,49 +314,46 @@ def main():
     print(f"\n📂 Repository root: {repo_root}")
     print(f"📸 IMAGE directory: {image_dir}")
     
-    # Initialize Google Drive sync
+    # Initialize Google Drive sync with Service Account
     print("\n" + "=" * 70)
-    print("STEP 1: Connecting to Google Drive...")
+    print("STEP 1: Connecting to Google Drive with Service Account...")
     print("=" * 70)
     
     try:
-        drive_sync = GoogleDriveSync()
-        print("✓ Successfully authenticated with Google Drive")
+        # Check if credentials file exists
+        credentials_file = Path('credentials.json')
+        if not credentials_file.exists():
+            print(f"❌ credentials.json not found at {credentials_file.absolute()}")
+            print("\nPlease ensure credentials.json is in the repository root.")
+            print("To set up service account:")
+            print("1. Go to Google Cloud Console")
+            print("2. Create a Service Account")
+            print("3. Download the JSON key file")
+            print("4. Save it as 'credentials.json'")
+            print("5. Share your Google Drive folder with the service account email")
+            sys.exit(1)
+        
+        drive_sync = GoogleDriveSync('credentials.json')
     except Exception as e:
-        print(f"❌ Failed to authenticate: {e}")
-        print("\nPlease ensure:")
-        print("1. credentials.json is in the repository")
-        print("2. Google Drive API is enabled")
-        print("3. The service account has access to the folder")
+        print(f"❌ Failed to initialize Google Drive sync: {e}")
         sys.exit(1)
     
-    # Find the target folder
+    # Find date folders in the specified Drive folder
     print("\n" + "=" * 70)
-    print(f"STEP 2: Finding '{DRIVE_FOLDER_NAME}' folder...")
+    print(f"STEP 2: Scanning for date folders in Drive ID: {DRIVE_FOLDER_ID}...")
     print("=" * 70)
     
-    folder_id = drive_sync.find_folder_by_name(DRIVE_FOLDER_NAME)
-    if not folder_id:
-        print(f"❌ Could not find folder: {DRIVE_FOLDER_NAME}")
-        print("Please verify the folder name exists in Google Drive")
-        sys.exit(1)
-    
-    print(f"✓ Found folder: {DRIVE_FOLDER_NAME}")
-    
-    # Find all date folders
-    print("\n" + "=" * 70)
-    print("STEP 3: Scanning for date folders...")
-    print("=" * 70)
-    
-    date_folders = drive_sync.find_date_folders(folder_id)
+    date_folders = drive_sync.find_date_folders(DRIVE_FOLDER_ID)
     
     if not date_folders:
         print("❌ No YYYYMMDD_VID folders found in Google Drive")
+        print(f"   Please verify folder ID: {DRIVE_FOLDER_ID}")
+        print("   Folder names should match pattern: 20260302_VID")
         sys.exit(0)
     
-    print(f"✓ Found {len(date_folders)} date folder(s):")
+    print(f"\nFound {len(date_folders)} date folder(s):")
     for folder_name, _, date_str in date_folders[:10]:  # Show first 10
-        print(f"  - {folder_name} (Date: {date_str})")
+        print(f"  📁 {folder_name} (Date: {date_str})")
     
     if len(date_folders) > 10:
         print(f"  ... and {len(date_folders) - 10} more")
@@ -389,7 +362,7 @@ def main():
     newest_folders = date_folders[:3]
     
     print("\n" + "=" * 70)
-    print("STEP 4: Selecting 3 newest folders...")
+    print("STEP 3: Selecting 3 newest folders to sync...")
     print("=" * 70)
     
     for folder_name, _, date_str in newest_folders:
@@ -397,15 +370,15 @@ def main():
     
     # Download selected folders to temp directory
     print("\n" + "=" * 70)
-    print("STEP 5: Downloading folders from Google Drive...")
+    print("STEP 4: Downloading folders from Google Drive...")
     print("=" * 70)
     
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         downloaded_folders = []
         
-        for folder_name, folder_id, date_str in newest_folders:
-            print(f"\n📥 Downloading: {folder_name}")
+        for idx, (folder_name, folder_id, date_str) in enumerate(newest_folders, 1):
+            print(f"\n[{idx}/{len(newest_folders)}] 📥 Downloading: {folder_name}")
             local_folder_path = temp_path / folder_name
             
             if drive_sync.download_folder_recursive(folder_id, local_folder_path, folder_name):
@@ -419,7 +392,7 @@ def main():
         
         # Clear IMAGE folder
         print("\n" + "=" * 70)
-        print("STEP 6: Preparing IMAGE folder...")
+        print("STEP 5: Preparing IMAGE folder...")
         print("=" * 70)
         
         if not clear_image_folder(image_dir):
@@ -428,7 +401,7 @@ def main():
         
         # Copy downloaded folders to IMAGE
         print("\n" + "=" * 70)
-        print("STEP 7: Copying folders to IMAGE...")
+        print("STEP 6: Copying folders to IMAGE...")
         print("=" * 70)
         
         copied_folders = copy_downloaded_folders(temp_path, image_dir, downloaded_folders)
@@ -439,23 +412,28 @@ def main():
         
         # Validate structure
         print("\n" + "=" * 70)
-        print("STEP 8: Validating folder structure...")
+        print("STEP 7: Validating folder structure...")
         print("=" * 70)
         
         if validate_folder_structure(image_dir):
             print("✓ Folder structure validation passed")
         else:
-            print("⚠ Folder structure validation found issues")
+            print("⚠ Folder structure validation found issues (but continuing)")
         
         # Summary
         print("\n" + "=" * 70)
         print("SYNC SUMMARY")
         print("=" * 70)
         print(f"✅ Successfully synced {len(copied_folders)} folder(s) to IMAGE:")
+        
+        total_images = 0
         for folder_name in copied_folders:
             folder_path = image_dir / folder_name
             jpg_count = len(list(folder_path.glob("*.jpg")))
+            total_images += jpg_count
             print(f"  📁 {folder_name} - {jpg_count} images")
+        
+        print(f"\n📊 Total images synced: {total_images}")
         
         # Show missing if any
         if len(newest_folders) > len(copied_folders):
