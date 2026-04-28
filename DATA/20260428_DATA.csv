@@ -1,3 +1,4 @@
 time,mode,count,duration,leftpk,rightpk,leftavg,rightavg,recindex,recimprove,predtmr,pred2,pred3,pred4,pred5,pred6,predweek
 09:34,assistive,1,2,19.87,N/A,6.82,N/A,7.23,+0.00,7.23,7.23,7.23,7.23,7.23,7.23,7.23
 11:26,assistive,1,2,25.05,N/A,17.19,N/A,18.21,+0.00,18.21,18.21,18.21,18.21,18.21,18.21,18.21
+15:36,resistive,1,2,14.26,N/A,6.39,N/A,100.00,+0.00,100.00,100.00,100.00,100.00,100.00,100.00,100.00
