@@ -269,7 +269,7 @@ def convert_session_to_videos(
     video_dir: Path,
     missing_sessions: Set[int],
     fps: int = 12
-) -> List[Path]:
+) -> Tuple[List[Path], Set[int]]:
     """
     Convert only missing sessions within a date folder to videos.
     
@@ -280,17 +280,18 @@ def convert_session_to_videos(
         fps: Frames per second
     
     Returns:
-        List of created video file paths
+        Tuple of (List of created video file paths, Set of successfully converted session numbers)
     """
     date_str = parse_session_folder(session_folder.name)
     created_videos = []
+    converted_sessions = set()
     
     # Get organized images by session
     all_sessions = get_session_images(session_folder)
     
     if not all_sessions:
         print(f"  No valid images found in {session_folder.name}")
-        return created_videos
+        return created_videos, converted_sessions
     
     # Filter to only missing sessions
     sessions_to_convert = {
@@ -301,7 +302,7 @@ def convert_session_to_videos(
     
     if not sessions_to_convert:
         print(f"  No missing sessions to convert in {session_folder.name}")
-        return created_videos
+        return created_videos, converted_sessions
     
     print(f"\n📁 Processing {session_folder.name}")
     print(f"   Total sessions found: {len(all_sessions)}")
@@ -330,16 +331,17 @@ def convert_session_to_videos(
         
         if images_to_video(valid_images, output_path, fps):
             created_videos.append(output_path)
+            converted_sessions.add(session_num)
     
-    return created_videos
+    return created_videos, converted_sessions
 
 
-def delete_session_contents(session_folder: Path) -> bool:
+def delete_session_folder(session_folder: Path) -> bool:
     """
-    Delete all contents of a session folder after successful conversion.
+    Delete a session folder and all its contents.
     
     Args:
-        session_folder: Path to session folder to clear
+        session_folder: Path to session folder to delete
     
     Returns:
         True if successful, False otherwise
@@ -349,68 +351,108 @@ def delete_session_contents(session_folder: Path) -> bool:
         return False
     
     try:
-        deleted_count = 0
-        for item in session_folder.iterdir():
-            if item.is_file():
-                item.unlink()
-                deleted_count += 1
-            elif item.is_dir():
-                shutil.rmtree(item)
-                deleted_count += 1
+        # Count items before deletion
+        item_count = sum(1 for _ in session_folder.iterdir())
         
-        # Remove the empty folder
-        session_folder.rmdir()
-        print(f"  ✓ Deleted session folder: {session_folder.name} ({deleted_count} items)")
+        # Delete all contents and the folder itself
+        shutil.rmtree(session_folder)
+        print(f"  ✓ Deleted session folder: {session_folder.name} ({item_count} items)")
         return True
     except Exception as e:
-        print(f"  ✗ Error clearing {session_folder.name}: {e}")
+        print(f"  ✗ Error deleting {session_folder.name}: {e}")
+        return False
+
+
+def delete_individual_session_images(
+    session_folder: Path, 
+    converted_sessions: Set[int]
+) -> bool:
+    """
+    Delete images for specific sessions that have been converted.
+    
+    Args:
+        session_folder: Path to session folder
+        converted_sessions: Set of session numbers that were converted
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    if not converted_sessions:
+        return True
+    
+    try:
+        deleted_count = 0
+        pattern = re.compile(r'^(\d+)_(\d+)\.jpg$', re.IGNORECASE)
+        
+        for file_path in session_folder.glob("*.jpg"):
+            match = pattern.match(file_path.name)
+            if match:
+                session_num = int(match.group(1))
+                if session_num in converted_sessions:
+                    file_path.unlink()
+                    deleted_count += 1
+        
+        if deleted_count > 0:
+            print(f"  ✓ Deleted {deleted_count} image(s) for converted sessions: {sorted(converted_sessions)}")
+        
+        # Check if folder is empty after deletion
+        remaining_files = list(session_folder.glob("*"))
+        if not remaining_files:
+            # Folder is empty, delete it
+            session_folder.rmdir()
+            print(f"  ✓ Folder {session_folder.name} is now empty and has been removed")
+        
+        return True
+        
+    except Exception as e:
+        print(f"  ✗ Error deleting session images: {e}")
         return False
 
 
 def cleanup_processed_folders(
     image_dir: Path,
-    processed_dates: Dict[str, Set[int]],
-    original_sessions: Dict[str, Set[int]]
+    converted_sessions_by_date: Dict[str, Set[int]]
 ) -> None:
     """
-    Delete session folders that have been fully processed.
-    Only deletes a session folder if ALL its sessions have been converted.
+    Delete images for sessions that have been converted.
+    If a folder becomes empty after deletion, remove the folder.
     
     Args:
         image_dir: Path to IMAGE directory
-        processed_dates: Dict of date_str -> set of CONVERTED session numbers
-        original_sessions: Dict of date_str -> set of ALL session numbers that existed
+        converted_sessions_by_date: Dict of date_str -> set of CONVERTED session numbers
     """
     print("\n" + "=" * 60)
-    print("CLEANING UP PROCESSED SESSIONS")
+    print("CLEANING UP CONVERTED SESSIONS")
     print("=" * 60)
+    
+    if not converted_sessions_by_date:
+        print("No sessions were converted, nothing to clean up.")
+        return
+    
+    total_deleted_folders = 0
+    total_deleted_sessions = 0
     
     for session_folder in find_session_folders(image_dir):
         date_str = parse_session_folder(session_folder.name)
         
-        # Get all sessions in this folder
-        all_sessions_in_folder = get_session_images(session_folder)
-        all_session_nums = set(all_sessions_in_folder.keys())
-        
-        # Get sessions that were supposed to be converted (originally available)
-        original_for_date = original_sessions.get(date_str, set())
-        
-        # Get sessions that were actually converted
-        converted_for_date = processed_dates.get(date_str, set())
-        
-        # Check if ALL original sessions in this folder have been converted
-        if original_for_date and converted_for_date >= original_for_date:
-            print(f"\n📦 Session folder {session_folder.name}:")
-            print(f"   All {len(original_for_date)} session(s) converted successfully")
-            delete_session_contents(session_folder)
-        else:
-            missing = original_for_date - converted_for_date if original_for_date else set()
-            if missing:
-                print(f"\n📦 Session folder {session_folder.name}:")
-                print(f"   Waiting for missing sessions: {sorted(missing)}")
-                print(f"   Converted: {sorted(converted_for_date) if converted_for_date else 'None'}")
-                print(f"   Keeping folder for future processing")
+        if date_str in converted_sessions_by_date:
+            converted_sessions = converted_sessions_by_date[date_str]
+            
+            if converted_sessions:
+                print(f"\n📦 Processing {session_folder.name}")
+                print(f"   Converted sessions: {sorted(converted_sessions)}")
+                
+                # Delete images for converted sessions
+                if delete_individual_session_images(session_folder, converted_sessions):
+                    total_deleted_sessions += len(converted_sessions)
+                    
+                    # Check if folder was deleted
+                    if not session_folder.exists():
+                        total_deleted_folders += 1
     
+    print(f"\n📊 Cleanup Summary:")
+    print(f"   - Deleted images for {total_deleted_sessions} session(s)")
+    print(f"   - Removed {total_deleted_folders} empty folder(s)")
     print("\n✅ Cleanup completed")
 
 
@@ -483,22 +525,22 @@ def main():
     print("=" * 60)
     
     all_created_videos = []
-    processed_dates = {}  # Track what was actually converted
+    converted_sessions_by_date = {}  # Track what was actually converted
     
     for session_folder in find_session_folders(image_dir):
         date_str = parse_session_folder(session_folder.name)
         
         if date_str in missing_sessions:
-            created = convert_session_to_videos(
+            created_videos, converted_sessions = convert_session_to_videos(
                 session_folder, 
                 video_dir, 
                 missing_sessions[date_str],
                 fps=12
             )
             
-            if created:
-                all_created_videos.extend(created)
-                processed_dates[date_str] = missing_sessions[date_str]
+            if created_videos:
+                all_created_videos.extend(created_videos)
+                converted_sessions_by_date[date_str] = converted_sessions
     
     # Step 5: Summary
     print("\n" + "=" * 60)
@@ -511,8 +553,8 @@ def main():
             file_size = video.stat().st_size / (1024 * 1024)  # Size in MB
             print(f"  📹 {video.name} ({file_size:.2f} MB)")
         
-        # Step 6: Clean up processed folders
-        cleanup_processed_folders(image_dir, processed_dates, available_sessions)
+        # Step 6: Clean up converted sessions
+        cleanup_processed_folders(image_dir, converted_sessions_by_date)
     else:
         print("❌ No videos were created. Check errors above.")
     
@@ -525,7 +567,7 @@ def main():
     remaining_sessions = get_available_sessions(image_dir)
     if remaining_sessions:
         remaining_count = sum(len(sessions) for sessions in remaining_sessions.values())
-        print(f"⏳ {remaining_count} session(s) still pending (waiting for all frames):")
+        print(f"⏳ {remaining_count} session(s) still pending (not yet converted):")
         for date_str in sorted(remaining_sessions.keys()):
             sessions = sorted(remaining_sessions[date_str])
             print(f"  - {date_str}: sessions {sessions}")
