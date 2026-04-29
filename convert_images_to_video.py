@@ -2,6 +2,7 @@
 """
 Convert JPG images (VGA resolution, 12fps) to MP4 videos.
 Only converts missing videos by comparing with existing videos in VIDEO folder.
+After conversion, deletes ALL contents of IMAGE folder.
 Designed to run daily at 12:00 AM via GitHub Actions.
 """
 
@@ -269,7 +270,7 @@ def convert_session_to_videos(
     video_dir: Path,
     missing_sessions: Set[int],
     fps: int = 12
-) -> Tuple[List[Path], Set[int]]:
+) -> List[Path]:
     """
     Convert only missing sessions within a date folder to videos.
     
@@ -280,18 +281,17 @@ def convert_session_to_videos(
         fps: Frames per second
     
     Returns:
-        Tuple of (List of created video file paths, Set of successfully converted session numbers)
+        List of created video file paths
     """
     date_str = parse_session_folder(session_folder.name)
     created_videos = []
-    converted_sessions = set()
     
     # Get organized images by session
     all_sessions = get_session_images(session_folder)
     
     if not all_sessions:
         print(f"  No valid images found in {session_folder.name}")
-        return created_videos, converted_sessions
+        return created_videos
     
     # Filter to only missing sessions
     sessions_to_convert = {
@@ -302,7 +302,7 @@ def convert_session_to_videos(
     
     if not sessions_to_convert:
         print(f"  No missing sessions to convert in {session_folder.name}")
-        return created_videos, converted_sessions
+        return created_videos
     
     print(f"\n📁 Processing {session_folder.name}")
     print(f"   Total sessions found: {len(all_sessions)}")
@@ -331,129 +331,45 @@ def convert_session_to_videos(
         
         if images_to_video(valid_images, output_path, fps):
             created_videos.append(output_path)
-            converted_sessions.add(session_num)
     
-    return created_videos, converted_sessions
+    return created_videos
 
 
-def delete_session_folder(session_folder: Path) -> bool:
+def delete_all_image_contents(image_dir: Path) -> bool:
     """
-    Delete a session folder and all its contents.
-    
-    Args:
-        session_folder: Path to session folder to delete
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    if not session_folder.exists():
-        print(f"  Folder does not exist: {session_folder}")
-        return False
-    
-    try:
-        # Count items before deletion
-        item_count = sum(1 for _ in session_folder.iterdir())
-        
-        # Delete all contents and the folder itself
-        shutil.rmtree(session_folder)
-        print(f"  ✓ Deleted session folder: {session_folder.name} ({item_count} items)")
-        return True
-    except Exception as e:
-        print(f"  ✗ Error deleting {session_folder.name}: {e}")
-        return False
-
-
-def delete_individual_session_images(
-    session_folder: Path, 
-    converted_sessions: Set[int]
-) -> bool:
-    """
-    Delete images for specific sessions that have been converted.
-    
-    Args:
-        session_folder: Path to session folder
-        converted_sessions: Set of session numbers that were converted
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    if not converted_sessions:
-        return True
-    
-    try:
-        deleted_count = 0
-        pattern = re.compile(r'^(\d+)_(\d+)\.jpg$', re.IGNORECASE)
-        
-        for file_path in session_folder.glob("*.jpg"):
-            match = pattern.match(file_path.name)
-            if match:
-                session_num = int(match.group(1))
-                if session_num in converted_sessions:
-                    file_path.unlink()
-                    deleted_count += 1
-        
-        if deleted_count > 0:
-            print(f"  ✓ Deleted {deleted_count} image(s) for converted sessions: {sorted(converted_sessions)}")
-        
-        # Check if folder is empty after deletion
-        remaining_files = list(session_folder.glob("*"))
-        if not remaining_files:
-            # Folder is empty, delete it
-            session_folder.rmdir()
-            print(f"  ✓ Folder {session_folder.name} is now empty and has been removed")
-        
-        return True
-        
-    except Exception as e:
-        print(f"  ✗ Error deleting session images: {e}")
-        return False
-
-
-def cleanup_processed_folders(
-    image_dir: Path,
-    converted_sessions_by_date: Dict[str, Set[int]]
-) -> None:
-    """
-    Delete images for sessions that have been converted.
-    If a folder becomes empty after deletion, remove the folder.
+    Delete ALL contents of IMAGE folder.
     
     Args:
         image_dir: Path to IMAGE directory
-        converted_sessions_by_date: Dict of date_str -> set of CONVERTED session numbers
+    
+    Returns:
+        True if successful, False otherwise
     """
-    print("\n" + "=" * 60)
-    print("CLEANING UP CONVERTED SESSIONS")
-    print("=" * 60)
+    if not image_dir.exists():
+        print(f"IMAGE folder does not exist: {image_dir}")
+        return False
     
-    if not converted_sessions_by_date:
-        print("No sessions were converted, nothing to clean up.")
-        return
-    
-    total_deleted_folders = 0
-    total_deleted_sessions = 0
-    
-    for session_folder in find_session_folders(image_dir):
-        date_str = parse_session_folder(session_folder.name)
+    try:
+        deleted_count = 0
+        for item in image_dir.iterdir():
+            if item.is_file():
+                item.unlink()
+                deleted_count += 1
+                print(f"  Deleted file: {item.name}")
+            elif item.is_dir():
+                shutil.rmtree(item)
+                deleted_count += 1
+                print(f"  Deleted folder: {item.name}")
         
-        if date_str in converted_sessions_by_date:
-            converted_sessions = converted_sessions_by_date[date_str]
-            
-            if converted_sessions:
-                print(f"\n📦 Processing {session_folder.name}")
-                print(f"   Converted sessions: {sorted(converted_sessions)}")
-                
-                # Delete images for converted sessions
-                if delete_individual_session_images(session_folder, converted_sessions):
-                    total_deleted_sessions += len(converted_sessions)
-                    
-                    # Check if folder was deleted
-                    if not session_folder.exists():
-                        total_deleted_folders += 1
-    
-    print(f"\n📊 Cleanup Summary:")
-    print(f"   - Deleted images for {total_deleted_sessions} session(s)")
-    print(f"   - Removed {total_deleted_folders} empty folder(s)")
-    print("\n✅ Cleanup completed")
+        if deleted_count > 0:
+            print(f"\n✓ Successfully deleted {deleted_count} item(s) from IMAGE folder")
+        else:
+            print("✓ IMAGE folder was already empty")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error deleting IMAGE contents: {e}")
+        return False
 
 
 def main():
@@ -511,6 +427,12 @@ def main():
     
     if not missing_sessions:
         print("✅ All videos are already converted! Nothing to do.")
+        # Still delete everything if there are files in IMAGE?
+        if any(image_dir.iterdir()):
+            print("\n⚠ IMAGE folder has files but all videos exist.")
+            response = input("Delete IMAGE contents anyway? (y/n): ")
+            if response.lower() == 'y':
+                delete_all_image_contents(image_dir)
         sys.exit(0)
     
     total_missing = sum(len(sessions) for sessions in missing_sessions.values())
@@ -525,22 +447,18 @@ def main():
     print("=" * 60)
     
     all_created_videos = []
-    converted_sessions_by_date = {}  # Track what was actually converted
     
     for session_folder in find_session_folders(image_dir):
         date_str = parse_session_folder(session_folder.name)
         
         if date_str in missing_sessions:
-            created_videos, converted_sessions = convert_session_to_videos(
+            created_videos = convert_session_to_videos(
                 session_folder, 
                 video_dir, 
                 missing_sessions[date_str],
                 fps=12
             )
-            
-            if created_videos:
-                all_created_videos.extend(created_videos)
-                converted_sessions_by_date[date_str] = converted_sessions
+            all_created_videos.extend(created_videos)
     
     # Step 5: Summary
     print("\n" + "=" * 60)
@@ -553,26 +471,35 @@ def main():
             file_size = video.stat().st_size / (1024 * 1024)  # Size in MB
             print(f"  📹 {video.name} ({file_size:.2f} MB)")
         
-        # Step 6: Clean up converted sessions
-        cleanup_processed_folders(image_dir, converted_sessions_by_date)
+        # Step 6: DELETE EVERYTHING IN IMAGE FOLDER
+        print("\n" + "=" * 60)
+        print("STEP 5: Deleting ALL contents of IMAGE folder...")
+        print("=" * 60)
+        
+        if delete_all_image_contents(image_dir):
+            print("\n✅ IMAGE folder has been completely cleared!")
+        else:
+            print("\n⚠ Failed to delete some contents from IMAGE folder")
     else:
-        print("❌ No videos were created. Check errors above.")
+        print("❌ No videos were created. IMAGE folder will NOT be deleted.")
     
-    # Final summary
+    # Final status
     print("\n" + "=" * 60)
     print("FINAL STATUS")
     print("=" * 60)
     
-    # Show what's left
-    remaining_sessions = get_available_sessions(image_dir)
-    if remaining_sessions:
-        remaining_count = sum(len(sessions) for sessions in remaining_sessions.values())
-        print(f"⏳ {remaining_count} session(s) still pending (not yet converted):")
-        for date_str in sorted(remaining_sessions.keys()):
-            sessions = sorted(remaining_sessions[date_str])
-            print(f"  - {date_str}: sessions {sessions}")
+    # Check if IMAGE folder is empty
+    remaining_items = list(image_dir.iterdir())
+    if not remaining_items:
+        print("✅ IMAGE folder is empty")
     else:
-        print("✅ All image folders have been processed and cleaned up!")
+        print(f"⚠ IMAGE folder still has {len(remaining_items)} item(s)")
+        for item in remaining_items:
+            print(f"  - {item.name}")
+    
+    # Show videos created
+    video_count = len(list(video_dir.glob("*.mp4")))
+    print(f"📹 Total videos in VIDEO folder: {video_count}")
     
     print("\n" + "=" * 60)
     print(f"🏁 Process completed at {datetime.now()}")
